@@ -1,0 +1,111 @@
+from fastapi import FastAPI, HTTPException, Query
+import os
+import subprocess
+import json
+import sqlite3
+from typing import Optional
+from PIL import Image
+import pytesseract
+import openai
+
+# Load API Token
+AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN")
+
+# FastAPI App
+app = FastAPI()
+
+# OpenAI API Setup
+openai.api_key = AIPROXY_TOKEN
+
+def run_shell_command(command: str):
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=result.stderr)
+        return result.stdout
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/run")
+def run_task(task: str = Query(..., description="Task description")):
+    """Processes a natural language task and executes it."""
+    try:
+        # Use LLM to interpret the task
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are an automation assistant that converts natural language tasks into executable steps."},
+                {"role": "user", "content": task},
+            ]
+        )
+        command = response["choices"][0]["message"]["content"]
+        
+        # Execute the interpreted command
+        output = run_shell_command(command)
+        return {"status": "success", "output": output}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/read")
+def read_file(path: str):
+    """Reads a file and returns its content."""
+    if not path.startswith("/data/"):
+        raise HTTPException(status_code=403, detail="Access outside /data is not allowed")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    with open(path, "r", encoding="utf-8") as file:
+        return file.read()
+
+# Task Handlers
+
+def count_wednesdays(file_path: str, output_path: str):
+    with open(file_path, "r") as f:
+        dates = f.readlines()
+    count = sum(1 for date in dates if "Wed" in date)
+    with open(output_path, "w") as f:
+        f.write(str(count))
+
+@app.get("/process_dates")
+def process_dates():
+    count_wednesdays("/data/dates.txt", "/data/dates-wednesdays.txt")
+    return {"message": "Processed dates."}
+
+def sort_contacts():
+    with open("/data/contacts.json", "r") as f:
+        contacts = json.load(f)
+    contacts.sort(key=lambda x: (x["last_name"], x["first_name"]))
+    with open("/data/contacts-sorted.json", "w") as f:
+        json.dump(contacts, f, indent=4)
+
+@app.get("/process_contacts")
+def process_contacts():
+    sort_contacts()
+    return {"message": "Contacts sorted."}
+
+# OCR Task
+def extract_credit_card():
+    image = Image.open("/data/credit-card.png")
+    text = pytesseract.image_to_string(image)
+    card_number = "".join(filter(str.isdigit, text))
+    with open("/data/credit-card.txt", "w") as f:
+        f.write(card_number)
+
+@app.get("/process_credit_card")
+def process_credit_card():
+    extract_credit_card()
+    return {"message": "Credit card extracted."}
+
+# SQL Task
+def get_gold_ticket_sales():
+    conn = sqlite3.connect("/data/ticket-sales.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT SUM(units * price) FROM tickets WHERE type='Gold'")
+    result = cursor.fetchone()[0]
+    conn.close()
+    with open("/data/ticket-sales-gold.txt", "w") as f:
+        f.write(str(result))
+
+@app.get("/process_tickets")
+def process_tickets():
+    get_gold_ticket_sales()
+    return {"message": "Ticket sales calculated."}
